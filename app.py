@@ -53,7 +53,7 @@ BUSINESS_CONFIG = {
         "rotten egg", "flooding", "no ac", "no cooling", "burning smell",
         "sparking", "carbon monoxide",
     ],
-    "owner_phone": "+4386996244",       # gets escalation texts
+    "owner_phone": "+14386996244",       # gets escalation texts
     # MVP stand-in for real calendar write
     "booking_link": "https://calendly.com/jakes-hvac/service-call",
 }
