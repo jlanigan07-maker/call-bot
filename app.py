@@ -53,7 +53,7 @@ BUSINESS_CONFIG = {
         "rotten egg", "flooding", "no ac", "no cooling", "burning smell",
         "sparking", "carbon monoxide",
     ],
-    "owner_phone": "+15550001111",       # gets escalation texts
+    "owner_phone": "+4386996244",       # gets escalation texts
     # MVP stand-in for real calendar write
     "booking_link": "https://calendly.com/jakes-hvac/service-call",
 }
@@ -211,7 +211,15 @@ def start_or_continue_conversation(phone_number: str, inbound_text: str):
 
     keyword_flagged_emergency = is_emergency(BUSINESS_CONFIG, inbound_text)
     if keyword_flagged_emergency or claude_flagged_emergency:
-        escalate_to_owner(BUSINESS_CONFIG, phone_number, inbound_text)
+        try:
+            escalate_to_owner(BUSINESS_CONFIG, phone_number, inbound_text)
+        except Exception as e:
+            # A failed escalation (bad owner number, Twilio hiccup, etc.)
+            # should NEVER block the customer's actual reply - that's worse
+            # than a missed page. Log it loudly instead so it's not silently
+            # lost, but don't let it crash this request.
+            print(
+                f"[ESCALATION FAILED] Could not text owner_phone about {phone_number}: {e}")
 
     return reply
 
