@@ -11,7 +11,8 @@ Stack:
 - Flask: receives webhooks (Twilio call events, web form submissions, inbound SMS replies)
 - Twilio: sends/receives SMS, detects missed calls
 - Claude API (Anthropic): drafts the qualifying conversation AND flags emergencies
-- In-memory store for conversation state (swap for a real DB — Postgres/SQLite — before production)
+- SQLite for conversation state (see DB_PATH below - point it at a Render
+  Persistent Disk in production so history survives restarts/redeploys)
 
 Emergency detection uses two signals, either of which can trigger escalation:
 1. A plain keyword match on the lead's raw message (fast, cheap, but only
@@ -26,6 +27,7 @@ flesh out per client (calendar booking, persistent storage, multi-tenant config)
 
 import os
 import json
+import sqlite3
 from flask import Flask, request, Response
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
@@ -53,23 +55,71 @@ BUSINESS_CONFIG = {
         "rotten egg", "flooding", "no ac", "no cooling", "burning smell",
         "sparking", "carbon monoxide",
     ],
-    "owner_phone": "+14386996244",       # gets escalation texts
-    # MVP stand-in for real calendar write
-    "booking_link": "https://calendly.com/jakes-hvac/service-call",
+    "owner_phone": "+15550001111",       # gets escalation texts
+    "booking_link": "https://calendly.com/jakes-hvac/service-call",  # MVP stand-in for real calendar write
 }
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
-TWILIO_FROM_NUMBER = os.environ.get(
-    "TWILIO_FROM_NUMBER")  # the business's Twilio number
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")  # the business's Twilio number
 
 claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
-# TODO: replace with a real DB table (lead_id -> conversation history + status)
-# { phone_number: [ {"role": "user"/"assistant", "content": "..."} ] }
-CONVERSATIONS = {}
+# ---------------------------------------------------------------------------
+# Persistent storage (SQLite) - replaces the old in-memory CONVERSATIONS dict
+# ---------------------------------------------------------------------------
+# DB_PATH should point at a Render Persistent Disk mount path in production
+# (e.g. /var/data/conversations.db) so history survives restarts/redeploys.
+# Defaults to a local file for running on your own machine.
+DB_PATH = os.environ.get("DB_PATH", "conversations.db")
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone_number TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_phone ON messages(phone_number)")
+    conn.commit()
+    conn.close()
+
+
+def get_history(phone_number: str) -> list:
+    """Returns this phone number's full conversation as a list of {role, content} dicts."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT role, content FROM messages WHERE phone_number = ? ORDER BY id ASC",
+        (phone_number,),
+    ).fetchall()
+    conn.close()
+    return [{"role": row["role"], "content": row["content"]} for row in rows]
+
+
+def append_message(phone_number: str, role: str, content: str) -> None:
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO messages (phone_number, role, content) VALUES (?, ?, ?)",
+        (phone_number, role, content),
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()  # safe to call every startup - CREATE TABLE IF NOT EXISTS is a no-op if it already exists
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +194,7 @@ def call_claude(cfg: dict, history: list) -> tuple[str, bool]:
             raw_text = block.text.strip()
             break
     if raw_text is None:
-        raise ValueError(
-            f"No text block found in Claude's response: {response.content!r}")
+        raise ValueError(f"No text block found in Claude's response: {response.content!r}")
 
     is_emergency_flag = False
     reply_lines = []
@@ -203,11 +252,11 @@ def escalate_to_owner(cfg: dict, lead_number: str, reason: str):
 
 
 def start_or_continue_conversation(phone_number: str, inbound_text: str):
-    history = CONVERSATIONS.setdefault(phone_number, [])
-    history.append({"role": "user", "content": inbound_text})
+    append_message(phone_number, "user", inbound_text)
+    history = get_history(phone_number)
 
     reply, claude_flagged_emergency = call_claude(BUSINESS_CONFIG, history)
-    history.append({"role": "assistant", "content": reply})
+    append_message(phone_number, "assistant", reply)
 
     keyword_flagged_emergency = is_emergency(BUSINESS_CONFIG, inbound_text)
     if keyword_flagged_emergency or claude_flagged_emergency:
@@ -218,8 +267,7 @@ def start_or_continue_conversation(phone_number: str, inbound_text: str):
             # should NEVER block the customer's actual reply - that's worse
             # than a missed page. Log it loudly instead so it's not silently
             # lost, but don't let it crash this request.
-            print(
-                f"[ESCALATION FAILED] Could not text owner_phone about {phone_number}: {e}")
+            print(f"[ESCALATION FAILED] Could not text owner_phone about {phone_number}: {e}")
 
     return reply
 
@@ -248,14 +296,12 @@ def voice_incoming():
     """
     caller_number = request.form.get("From")
 
-    opening = "Hi! Sorry we missed your call — this is " + \
-        BUSINESS_CONFIG["name"] + ". What can we help with today?"
-    CONVERSATIONS[caller_number] = [{"role": "assistant", "content": opening}]
+    opening = "Hi! Sorry we missed your call — this is " + BUSINESS_CONFIG["name"] + ". What can we help with today?"
+    append_message(caller_number, "assistant", opening)
     send_sms(caller_number, opening)
 
     twiml = VoiceResponse()
-    twiml.say(
-        "Thanks for calling. We're texting you right now so we can help you faster.")
+    twiml.say("Thanks for calling. We're texting you right now so we can help you faster.")
     twiml.hangup()
     return Response(str(twiml), mimetype="application/xml")
 
