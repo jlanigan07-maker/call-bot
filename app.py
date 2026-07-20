@@ -146,87 +146,76 @@ within seconds. Your job in this conversation:
 6. If the request is for a service you don't offer (only {cfg['services']}
    are in scope), say so clearly instead of trying to book it.
 
-Respond in EXACTLY this two-line format, nothing before or after it, no
-markdown, no code fences:
+You must always respond by calling the send_sms_reply tool - never respond
+with plain text."""
 
-EMERGENCY: true or false
-REPLY: the exact SMS text to send next
 
-Set EMERGENCY to true if there is any safety risk needing immediate
-attention — gas leaks, carbon monoxide, fire, flooding, no heat in freezing
-weather, or anything a reasonable person would consider urgent — even if it
-doesn't match an obvious keyword. When unsure, set it to true rather than
-false; missing a real emergency is worse than a false alarm.
-
-Put EMERGENCY on its own line FIRST, before REPLY — that way, even if your
-response gets cut short, the emergency flag still comes through correctly."""
+# Forcing this through tool-calling (rather than asking Claude to format its
+# own text response) means the API itself guarantees the shape of every
+# response - "is_emergency" and "reply" always come back as real, separate
+# fields. The old approach (asking Claude to prefix its reply with
+# "EMERGENCY: / REPLY:" as plain text) drifted over longer conversations:
+# Claude would sometimes just reply normally and skip the format entirely,
+# which silently broke parsing. Tool-calling doesn't have that failure mode.
+REPLY_TOOL = {
+    "name": "send_sms_reply",
+    "description": "Send the next SMS reply to the lead and flag whether this is an emergency.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "is_emergency": {
+                "type": "boolean",
+                "description": (
+                    "True if there is any safety risk needing immediate attention - gas leaks, "
+                    "carbon monoxide, fire, flooding, no heat in freezing weather, or anything a "
+                    "reasonable person would consider urgent - even if it doesn't match an obvious "
+                    "keyword. When unsure, set true rather than false; missing a real emergency is "
+                    "worse than a false alarm."
+                ),
+            },
+            "reply": {
+                "type": "string",
+                "description": "The exact SMS text to send next.",
+            },
+        },
+        "required": ["is_emergency", "reply"],
+    },
+}
 
 
 def call_claude(cfg: dict, history: list) -> tuple[str, bool]:
     """
     Send conversation history to Claude and return (reply_text, claude_flagged_emergency).
 
-    claude_flagged_emergency is Claude's own judgment call, parsed out of its
-    plain-text "EMERGENCY: / REPLY:" response — separate from (and in
-    addition to) the plain keyword check in is_emergency().
-
-    Deliberately NOT using strict JSON here: if Claude's response gets cut
-    off by max_tokens partway through, a JSON object would come back invalid
-    and unparseable, and the old fallback ended up sending the raw broken
-    JSON straight to the customer as a text message. This line-based format
-    degrades gracefully instead — a truncated reply is just a shorter
-    (still readable) message, not corrupted syntax.
+    Uses tool-calling (forced via tool_choice) instead of asking Claude to
+    format its own text response - see REPLY_TOOL above for why.
     """
     response = claude.messages.create(
         model="claude-sonnet-5",
-        max_tokens=500,  # extra headroom vs. the reply alone, so the EMERGENCY/REPLY
-                         # wrapper doesn't push a normal-length reply past the limit
+        max_tokens=500,
         system=build_system_prompt(cfg),
         messages=history,
+        tools=[REPLY_TOOL],
+        tool_choice={"type": "tool", "name": "send_sms_reply"},
     )
 
-    # response.content can include non-text blocks (e.g. thinking blocks)
-    # ahead of the actual reply, so find the text block rather than
-    # assuming it's always content[0].
-    raw_text = None
     for block in response.content:
-        if block.type == "text":
-            raw_text = block.text.strip()
+        if block.type == "tool_use" and block.name == "send_sms_reply":
+            reply_text = str(block.input.get("reply", "")).strip()
+            is_emergency_flag = bool(block.input.get("is_emergency", False))
+            if reply_text:
+                return reply_text, is_emergency_flag
             break
-    if raw_text is None:
-        raise ValueError(f"No text block found in Claude's response: {response.content!r}")
 
-    is_emergency_flag = False
-    reply_lines = []
-    reply_started = False
-
-    for line in raw_text.split("\n"):
-        stripped = line.strip()
-        if not reply_started and stripped.upper().startswith("EMERGENCY:"):
-            is_emergency_flag = "true" in stripped.lower()
-        elif stripped.upper().startswith("REPLY:"):
-            reply_started = True
-            reply_lines.append(stripped.split(":", 1)[1].strip())
-        elif reply_started:
-            reply_lines.append(line)
-
-    reply_text = "\n".join(reply_lines).strip()
-
-    if not reply_text:
-        # Parsing failed entirely (Claude didn't follow the format at all) —
-        # send a safe generic message rather than leaking raw/broken text to
-        # the customer. The keyword check in start_or_continue_conversation
-        # still runs independently, so a real emergency isn't silently missed
-        # just because this parse failed.
-        # Log the raw response so this is actually debuggable instead of a
-        # silent fallback - check Render's Logs tab when this fires.
-        print(f"[PARSE FAILED] Claude's raw response didn't match the expected format: {raw_text!r}")
-        reply_text = (
-            "Thanks for reaching out — we got your message and someone from "
-            "our team will follow up with you shortly."
-        )
-
-    return reply_text, is_emergency_flag
+    # Forcing tool_choice should make this unreachable in normal operation,
+    # but keep a safe fallback rather than crashing the request if the API
+    # ever returns something unexpected (e.g. hit max_tokens before the tool
+    # call finished). Log it so it's debuggable, same as before.
+    print(f"[PARSE FAILED] No usable send_sms_reply tool call in Claude's response: {response.content!r}")
+    return (
+        "Thanks for reaching out — we got your message and someone from "
+        "our team will follow up with you shortly."
+    ), False
 
 
 def is_emergency(cfg: dict, text: str) -> bool:
