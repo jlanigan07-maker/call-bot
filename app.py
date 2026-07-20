@@ -218,6 +218,9 @@ def call_claude(cfg: dict, history: list) -> tuple[str, bool]:
         # the customer. The keyword check in start_or_continue_conversation
         # still runs independently, so a real emergency isn't silently missed
         # just because this parse failed.
+        # Log the raw response so this is actually debuggable instead of a
+        # silent fallback - check Render's Logs tab when this fires.
+        print(f"[PARSE FAILED] Claude's raw response didn't match the expected format: {raw_text!r}")
         reply_text = (
             "Thanks for reaching out — we got your message and someone from "
             "our team will follow up with you shortly."
