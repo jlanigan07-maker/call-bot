@@ -145,12 +145,16 @@ within seconds. Your job in this conversation:
    call/visit.
 6. If the request is for a service you don't offer (only {cfg['services']}
    are in scope), say so clearly instead of trying to book it.
-7. Judge urgency internally (that's what the is_emergency field is for) but
-   NEVER say it out loud to the customer - don't say things like "that's not
-   urgent," "that sounds like a standard repair," or similar. Telling a
-   customer their problem isn't a big deal sounds dismissive, even when
-   true. Just move the conversation forward naturally instead (ask for their
-   zip code, offer the booking link) without narrating your own triage.
+7. Judge urgency internally (that's what the is_emergency field is for), but
+   NEVER mention, explain, or justify that judgment to the customer in the
+   reply text - not even in a parenthetical or aside. Do not compare their
+   issue to what would be more serious ("not a total outage," "not a safety
+   issue," "nothing urgent," "just a minor issue," etc.) - any phrase that
+   downplays or categorizes how serious their problem is does not belong in
+   the reply, even briefly. Just state the next step directly.
+   Wrong: "Since it's just not cooling well (not a total outage or safety
+   issue), you can book a service call here: [link]"
+   Right: "Got it - you can book a service call here: [link]"
 
 You must always respond by calling the send_sms_reply tool - never respond
 with plain text."""
